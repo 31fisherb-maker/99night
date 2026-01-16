@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en-us">
+<head>
+    <meta charset="utf-8"/>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+    <title>Unity WebGL Player | 99Days</title>
+    
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/bubbls/99itf@main/style.css"/>
+
+    <style>
+        /* Base Styles */
+        html, body {
+            padding: 0;
+            margin: 0;
+            overflow: hidden;
+            height: 100%;
+            background-color: #232323;
+            -webkit-touch-callout: none;
+            user-select: none;
+            -webkit-tap-highlight-color: rgba(0,0,0,0);
+        }
+
+        canvas:focus { 
+            outline: none;
+        }
+
+        #unity-container {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+        }
+
+        #unity-canvas {
+            width: 100%;
+            height: 100%;
+            background: #231f20;
+        }
+
+        /* Loading UI */
+        #loading-cover {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #231f20;
+            z-index: 10;
+        }
+
+        #unity-loading-bar {
+            width: 200px;
+        }
+
+        #unity-progress-bar-empty {
+            width: 100%;
+            height: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+
+        #unity-progress-bar-full {
+            width: 0%;
+            height: 100%;
+            background: #fff;
+            border-radius: 5px;
+            transition: width 0.2s;
+        }
+
+        .spinner {
+            border: 4px solid rgba(255,255,255,0.1);
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            border-left-color: #fff;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        /* Ad Styles */
+        #ad-container {
+            position: fixed;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            width: min(728px, calc(100% - 20px));
+            height: 90px;
+            background: rgba(0, 0, 0, 0.90);
+            display: none;
+            z-index: 99999;
+            overflow: hidden;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.45);
+            transition: transform 0.5s ease-in-out;
+        }
+
+        #ad-container.hidden {
+            transform: translate(-50%, -100%);
+        }
+
+        #close-ad {
+            position: absolute;
+            top: 6px;
+            right: 8px;
+            background: #ff4d4d;
+            color: #fff;
+            border: none;
+            padding: 5px 9px;
+            font-size: 13px;
+            border-radius: 4px;
+            cursor: not-allowed;
+            opacity: 0.7;
+            z-index: 100000;
+        }
+
+        #close-ad.enabled {
+            cursor: pointer;
+            opacity: 1;
+        }
+    </style>
+</head>
+<body class="dark">
+
+    <div id="unity-container">
+        <canvas id="unity-canvas" tabindex="-1"></canvas>
+        <div id="loading-cover">
+            <div id="unity-loading-bar">
+                <div class="spinner"></div>
+                <div id="unity-progress-bar-empty">
+                    <div id="unity-progress-bar-full"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="ad-container" aria-hidden="true">
+        <iframe id="ad-iframe" width="100%" height="90" frameborder="0" sandbox="allow-scripts allow-popups allow-same-origin"></iframe>
+        <button id="close-ad" disabled>Close (12)</button>
+    </div>
+
+    <script>
+        const buildUrl = "https://cdn.jsdelivr.net/gh/bubbls/99itf@main/Build";
+        const loaderUrl = buildUrl + "/Build.loader.js";
+        const cdnBaseUrl = "https://cdn.jsdelivr.net/gh/bubbls/99itf@main/";
+
+        const dataParts = [
+            cdnBaseUrl + "Build.data.br.part0",
+            cdnBaseUrl + "Build.data.br.part1",
+            cdnBaseUrl + "Build.data.br.part2",
+            cdnBaseUrl + "Build.data.br.part3",
+        ];
+        const wasmParts = [
+            cdnBaseUrl + "Build.wasm.br.part0",
+            cdnBaseUrl + "Build.wasm.br.part1",
+            cdnBaseUrl + "Build.wasm.br.part2",
+            cdnBaseUrl + "Build.wasm.br.part3",
+            cdnBaseUrl + "Build.wasm.br.part4",
+        ];
+
+        async function fetchAndCombineParts(partUrls) {
+            const buffers = [];
+            for (const url of partUrls) {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`Failed to fetch ${url}`);
+                const buffer = await response.arrayBuffer();
+                buffers.push(buffer);
+            }
+            const totalLength = buffers.reduce((sum, buf) => sum + buf.byteLength, 0);
+            const combined = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const buffer of buffers) {
+                combined.set(new Uint8Array(buffer), offset);
+                offset += buffer.byteLength;
+            }
+            return new Blob([combined], { type: 'application/octet-stream' });
+        }
+
+        const config = {
+            dataUrl: "", 
+            frameworkUrl: buildUrl + "/Build.framework.js",
+            codeUrl: "", 
+            streamingAssetsUrl: "StreamingAssets",
+            companyName: "DefaultCompany",
+            productName: "99Days",
+            productVersion: "0.1"
+        };
+
+        const canvas = document.querySelector("#unity-canvas");
+        const loadingCover = document.querySelector("#loading-cover");
+        const progressBarFull = document.querySelector("#unity-progress-bar-full");
+        const spinner = document.querySelector('.spinner');
+
+        // Initializer
+        const script = document.createElement("script");
+        script.src = loaderUrl;
+        script.onload = async () => {
+            try {
+                // Combine split files
+                const [dataBlob, wasmBlob] = await Promise.all([
+                    fetchAndCombineParts(dataParts),
+                    fetchAndCombineParts(wasmParts)
+                ]);
+
+                config.dataUrl = URL.createObjectURL(dataBlob);
+                config.codeUrl = URL.createObjectURL(wasmBlob);
+
+                createUnityInstance(canvas, config, (progress) => {
+                    spinner.style.display = "none";
+                    progressBarFull.style.width = `${100 * progress}%`;
+                }).then((unityInstance) => {
+                    loadingCover.style.display = "none";
+                    window.myGameInstance = unityInstance;
+                }).catch((error) => {
+                    console.error("Unity Load Error:", error);
+                });
+            } catch (err) {
+                console.error("File combination error:", err);
+            }
+        };
+        document.body.appendChild(script);
+
+        // --- Ad Logic ---
+        (function() {
+            const adContainer = document.getElementById('ad-container');
+            const closeBtn = document.getElementById('close-ad');
+            
+            function showAd() {
+                adContainer.style.display = 'block';
+                adContainer.classList.remove('hidden');
+                let timeLeft = 12;
+                closeBtn.disabled = true;
+                closeBtn.classList.remove('enabled');
+
+                const timer = setInterval(() => {
+                    timeLeft--;
+                    if (timeLeft > 0) {
+                        closeBtn.textContent = `Close (${timeLeft})`;
+                    } else {
+                        clearInterval(timer);
+                        closeBtn.disabled = false;
+                        closeBtn.classList.add('enabled');
+                        closeBtn.textContent = 'Close ↑';
+                    }
+                }, 1000);
+            }
+
+            closeBtn.addEventListener('click', () => {
+                adContainer.classList.add('hidden');
+                setTimeout(showAd, 25000); 
+            });
+
+            setTimeout(showAd, 2000);
+        })();
+
+        // Placeholder for missing player initialization
+        function initPlayer() {
+            console.log("Player initialized");
+        }
+    </script>
+</body>
+</html>
